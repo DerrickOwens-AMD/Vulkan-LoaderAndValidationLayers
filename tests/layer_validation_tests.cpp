@@ -14631,6 +14631,130 @@ TEST_F(VkLayerTest, CreatePipelineVertexOutputNotConsumed) {
     m_errorMonitor->VerifyFound();
 }
 
+TEST_F(VkLayerTest, CreatePipelineBadSpecialization) {
+    TEST_DESCRIPTION("Challenge core_validation on the condition where the wrong shader entrypoint is provided");
+
+    ASSERT_NO_FATAL_FAILURE(InitState());
+    ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+
+    const char *bad_specialization_message = "Specialization entry ";
+
+    char const *vsSource =
+            "#version 450\n"
+            "\n"
+            "layout(location=0) out float x;\n"
+            "out gl_PerVertex {\n"
+            "    vec4 gl_Position;\n"
+            "};\n"
+            "void main(){\n"
+            "   x = 0;\n"
+            "}\n";
+
+    char const *fsSource =
+            "#version 450\n"
+            "\n"
+            "layout(location = 0) out vec4 uFragColor;\n"
+            "void main(){\n"
+            "   uFragColor = vec4(0,1,0,1);\n"
+            "}\n";
+
+    VkShaderObj vs(m_device, vsSource, VK_SHADER_STAGE_VERTEX_BIT, this);
+    VkShaderObj fs(m_device, fsSource, VK_SHADER_STAGE_FRAGMENT_BIT, this);
+
+    VkPipelineLayoutCreateInfo pipeline_layout_ci = {};
+    pipeline_layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
+    VkPipelineLayout pipeline_layout;
+    ASSERT_VK_SUCCESS(vkCreatePipelineLayout(m_device->device(), &pipeline_layout_ci, nullptr, &pipeline_layout));
+
+    VkPipelineViewportStateCreateInfo vp_state_ci = {};
+    vp_state_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp_state_ci.viewportCount = 1;
+    VkViewport vp = {};           // Just need dummy vp to point to
+    vp_state_ci.pViewports = &vp;
+    vp_state_ci.scissorCount = 1;
+    VkRect2D scissors = {}; // Dummy scissors to point to
+    vp_state_ci.pScissors = &scissors;
+
+    VkDynamicState sc_state = VK_DYNAMIC_STATE_SCISSOR;
+    // Set scissor as dynamic to avoid second error
+    VkPipelineDynamicStateCreateInfo dyn_state_ci = {};
+    dyn_state_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dyn_state_ci.dynamicStateCount = 1;
+    dyn_state_ci.pDynamicStates = &sc_state;
+
+    VkPipelineShaderStageCreateInfo shaderStages[2] = {
+        vs.GetStageCreateInfo(),
+        fs.GetStageCreateInfo()
+    };
+
+    VkPipelineVertexInputStateCreateInfo vi_ci = {};
+    vi_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo ia_ci = {};
+    ia_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia_ci.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+
+    VkPipelineRasterizationStateCreateInfo rs_ci = {};
+    rs_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs_ci.pNext = nullptr;
+    rs_ci.lineWidth = 1.0f;
+    rs_ci.rasterizerDiscardEnable = true;
+
+    VkPipelineColorBlendAttachmentState att = {};
+    att.blendEnable = VK_FALSE;
+    att.colorWriteMask = 0xf;
+
+    VkPipelineColorBlendStateCreateInfo cb_ci = {};
+    cb_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb_ci.attachmentCount = 1;
+    cb_ci.pAttachments = &att;
+
+    VkGraphicsPipelineCreateInfo gp_ci = {};
+    gp_ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    gp_ci.stageCount = 2;
+    gp_ci.pStages = shaderStages;
+    gp_ci.pVertexInputState = &vi_ci;
+    gp_ci.pInputAssemblyState = &ia_ci;
+    gp_ci.pViewportState = &vp_state_ci;
+    gp_ci.pRasterizationState = &rs_ci;
+    gp_ci.pColorBlendState = &cb_ci;
+    gp_ci.pDynamicState = &dyn_state_ci;
+    gp_ci.flags = VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    gp_ci.layout = pipeline_layout;
+    gp_ci.renderPass = renderPass();
+
+    VkPipelineCacheCreateInfo pc_ci = {};
+    pc_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+
+    VkPipeline pipeline;
+    VkPipelineCache pipelineCache;
+    ASSERT_VK_SUCCESS(vkCreatePipelineCache(m_device->device(), &pc_ci, nullptr, &pipelineCache));
+
+    // This structure maps constant ids to data locations.
+    const VkSpecializationMapEntry entries[] =
+        // id,  offset,                size
+        {{0, 4, sizeof(uint32_t)}};
+
+    uint32_t data = 1;
+
+    // Set up the info describing spec map and data
+    const VkSpecializationInfo specialization_info = {
+        1,                 // mapEntryCount
+        entries,           // pMapEntries
+        1 * sizeof(float), // dataSize
+        &data,              // pData
+    };
+    shaderStages[0].pSpecializationInfo = &specialization_info;
+
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, bad_specialization_message);
+    vkCreateGraphicsPipelines(m_device->device(), pipelineCache, 1, &gp_ci, nullptr, &pipeline);
+    m_errorMonitor->VerifyFound();
+
+    vkDestroyPipelineCache(m_device->device(), pipelineCache, nullptr);
+    vkDestroyPipelineLayout(m_device->device(), pipeline_layout, nullptr);
+}
+
 TEST_F(VkLayerTest, CreatePipelineFragmentInputNotProvided) {
     TEST_DESCRIPTION("Test that an error is produced for a fragment shader input "
                      "which is not present in the outputs of the previous stage");
